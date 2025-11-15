@@ -1,10 +1,35 @@
 module.exports = class UserManager {
 
     constructor(mongo, lastFmManager) {
-        this.usersCollection = mongo.db('spotify-scrobbler')
-            .collection('users');
+        this.mongo = mongo;
         this.lastFmManager = lastFmManager;
         this.registeringCache = new Map();
+    }
+
+    // Get collection
+    getCollection() {
+        return this.mongo.db('spotify-scrobbler').collection('users');
+    }
+
+    // Helper to execute database operations with automatic reconnection
+    async executeWithReconnect(operation) {
+        try {
+            return await operation();
+        } catch (error) {
+            // If error is "Topology is closed", try to reconnect and retry once
+            if (error.message && error.message.includes('Topology is closed')) {
+                try {
+                    console.log('⚠️ Database connection closed, attempting to reconnect...');
+                    await this.mongo.connect();
+                    console.log('✅ Reconnected to MongoDB');
+                    // Retry the operation after reconnection
+                    return await operation();
+                } catch (reconnectError) {
+                    throw new Error(`Database connection error: ${reconnectError.message}`);
+                }
+            }
+            throw error;
+        }
     }
 
     async registerUser(id) {
@@ -12,7 +37,11 @@ module.exports = class UserManager {
             throw new Error(`User ${id} is already registering!`);
         }
 
-        if (await this.usersCollection.findOne({_id: id}) !== null) {
+        const usersCollection = this.getCollection();
+        const existingUser = await this.executeWithReconnect(async () => {
+            return await usersCollection.findOne({_id: id});
+        });
+        if (existingUser !== null) {
             throw new Error(`User with id ${id} is already registered.`);
         }
 
@@ -31,7 +60,10 @@ module.exports = class UserManager {
     }
 
     async unregister(id) {
-        const user = await this.usersCollection.findOne({_id: id});
+        const usersCollection = this.getCollection();
+        const user = await this.executeWithReconnect(async () => {
+            return await usersCollection.findOne({_id: id});
+        });
         if (user == null) {
             throw new Error(`User with id ${id} is not registered.`);
         }
@@ -63,21 +95,27 @@ module.exports = class UserManager {
             session: session.sessionKey
         }
 
-        this.usersCollection.replaceOne(
-            {
-                _id: id
-            },
-            user,
-            {
-                upsert: true
-            }
-        );
+        const usersCollection = this.getCollection();
+        await this.executeWithReconnect(async () => {
+            return await usersCollection.replaceOne(
+                {
+                    _id: id
+                },
+                user,
+                {
+                    upsert: true
+                }
+            );
+        });
 
         return user;
     }
 
     async getUser(id) {
-        let user = await this.usersCollection.findOne({_id: id});
+        const usersCollection = this.getCollection();
+        let user = await this.executeWithReconnect(async () => {
+            return await usersCollection.findOne({_id: id});
+        });
         if (!user) {
             throw new Error(`User with id ${id} was not found.`);
         }
@@ -86,6 +124,10 @@ module.exports = class UserManager {
     }
 
     async deleteUser(id) {
-        return await this.usersCollection.deleteOne({_id: id}).deletedCount > 0;
+        const usersCollection = this.getCollection();
+        const result = await this.executeWithReconnect(async () => {
+            return await usersCollection.deleteOne({_id: id});
+        });
+        return result.deletedCount > 0;
     }
 }
